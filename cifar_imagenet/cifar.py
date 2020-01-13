@@ -21,16 +21,20 @@ import torchvision.datasets as datasets
 import models.cifar as models
 
 from utils import Bar, Logger, AverageMeter, accuracy, mkdir_p, savefig
-from utils.radam import RAdam, AdamW
+from utils.radam import RAdam, RAdam_4step, AdamW
 
-from tensorboardX import SummaryWriter
-writer = SummaryWriter(logdir='/cps/gadam/log_cifa10/')
+# from tensorboardX import SummaryWriter
+# writer = SummaryWriter(logdir='/cps/gadam/log_cifa10/')
 
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(models.__dict__[name]))
 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10/100 Training')
+# 4 step options
+parser.add_argument('--update_all', action='store_true')
+parser.add_argument('--additional_four', action='store_true')
+
 # Datasets
 parser.add_argument('-d', '--dataset', default='cifar10', type=str)
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
@@ -44,7 +48,7 @@ parser.add_argument('--train-batch', default=128, type=int, metavar='N',
                     help='train batchsize')
 parser.add_argument('--test-batch', default=100, type=int, metavar='N',
                     help='test batchsize')
-parser.add_argument('--optimizer', default='sgd', type=str, choices=['adamw', 'cadam', 'sgd'])
+parser.add_argument('--optimizer', default='sgd', type=str, choices=['adamw', 'radam', 'radam4s', 'sgd'])
 parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
                     metavar='LR', help='initial learning rate')
 parser.add_argument('--beta1', default=0.9, type=float,
@@ -184,10 +188,12 @@ def main():
     criterion = nn.CrossEntropyLoss()
     if args.optimizer.lower() == 'sgd':
         optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
-    elif args.optimizer.lower() == 'adam':
-        optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), weight_decay=args.weight_decay)
-    elif args.optimizer.lower() == 'cadam':
-        optimizer = CAdam(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), weight_decay=args.weight_decay)
+    # elif args.optimizer.lower() == 'adam':
+    #     optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), weight_decay=args.weight_decay)
+    elif args.optimizer.lower() == 'radam':
+        optimizer = RAdam(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), weight_decay=args.weight_decay)
+    elif args.optimizer.lower() == 'radam4s':
+        optimizer = RAdam_4step(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), weight_decay=args.weight_decay, update_all=args.update_all, additional_four=args.additional_four)
     elif args.optimizer.lower() == 'adamw':
         optimizer = AdamW(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), weight_decay=args.weight_decay, warmup=args.warmup)
     # Resume
@@ -225,10 +231,10 @@ def main():
 
         # append logger file
         logger.append([state['lr'], train_loss, test_loss, train_acc, test_acc])
-        writer.add_scalars('loss_tracking/train_loss', {args.model_name: train_loss}, epoch)
-        writer.add_scalars('loss_tracking/test_loss', {args.model_name: test_loss}, epoch)
-        writer.add_scalars('loss_tracking/train_acc', {args.model_name: train_acc}, epoch)
-        writer.add_scalars('loss_tracking/test_acc', {args.model_name: test_acc}, epoch)
+        # writer.add_scalars('loss_tracking/train_loss', {args.model_name: train_loss}, epoch)
+        # writer.add_scalars('loss_tracking/test_loss', {args.model_name: test_loss}, epoch)
+        # writer.add_scalars('loss_tracking/train_acc', {args.model_name: train_acc}, epoch)
+        # writer.add_scalars('loss_tracking/test_acc', {args.model_name: test_acc}, epoch)
 
         # save model
         is_best = test_acc > best_acc
@@ -265,7 +271,7 @@ def train(trainloader, model, criterion, optimizer, epoch, use_cuda):
         data_time.update(time.time() - end)
 
         if use_cuda:
-            inputs, targets = inputs.cuda(), targets.cuda(async=True)
+            inputs, targets = inputs.cuda(), targets.cuda(non_blocking=True)
         inputs, targets = torch.autograd.Variable(inputs), torch.autograd.Variable(targets)
 
         # compute output
@@ -370,4 +376,4 @@ def adjust_learning_rate(optimizer, epoch):
 
 if __name__ == '__main__':
     main()
-    writer.close()
+    # writer.close()

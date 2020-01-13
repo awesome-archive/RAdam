@@ -10,21 +10,19 @@ import types
 
 import torch
 import torch.optim
-# from ipdb import set_trace
+
 from fairseq.optim import FairseqOptimizer, register_optimizer
 
-# from tensorboardX import SummaryWriter
-# # writer = SummaryWriter(logdir='./log/wmt/')
-# writer = SummaryWriter(logdir='./log/ada/')
-# iter_idx = 0
 
-@register_optimizer('radam')
-class FairseqRAdam(FairseqOptimizer):
+iter_idx = 0
+
+@register_optimizer('novograd')
+class FairseqNovograd(FairseqOptimizer):
 
     def __init__(self, args, params):
         super().__init__(args, params)
 
-        self._optimizer = RAdam(params, **self.optimizer_config)
+        self._optimizer = Novograd(params, **self.optimizer_config)
         self._optimizer.name = args.tb_tag + '_' + self._optimizer.name
 
     @staticmethod
@@ -39,6 +37,9 @@ class FairseqRAdam(FairseqOptimizer):
                             help='weight decay')
         parser.add_argument('--tb-tag', default="", type=str,
                             help='tb tag')
+        parser.add_argument('--amsgrad', action='store_true')
+        parser.add_argument('--adam-freeze', default=5000, type=float)
+        parser.add_argument('--adam-no-correction1', action='store_true')
         # fmt: on
 
     @property
@@ -54,17 +55,20 @@ class FairseqRAdam(FairseqOptimizer):
             'betas': eval(self.args.adam_betas),
             'eps': self.args.adam_eps,
             'weight_decay': self.args.weight_decay,
+            'amsgrad': self.args.amsgrad,
+            'adam_freeze': self.args.adam_freeze,
+            'adam_no_correction1': self.args.adam_no_correction1,
         }
 
-class RAdam(torch.optim.Optimizer):
+
+class Novograd(torch.optim.Optimizer):
 
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
-                 weight_decay=0, amsgrad=False):
+                 weight_decay=0, amsgrad=False, adam_freeze=5000, adam_no_correction1=False):
         defaults = dict(lr=lr, betas=betas, eps=eps,
-                        weight_decay=weight_decay, amsgrad=amsgrad)
-
+                        weight_decay=weight_decay, amsgrad=amsgrad, adam_freeze=adam_freeze, adam_no_correction1=adam_no_correction1)
         self.name = '{}_{}_{}'.format(lr, betas[0], betas[1])
-        super(RAdam, self).__init__(params, defaults)
+        super(Novograd, self).__init__(params, defaults)
 
     @property
     def supports_memory_efficient_fp16(self):
@@ -82,14 +86,13 @@ class RAdam(torch.optim.Optimizer):
         grad_list = list()
         mom_list = list()
         mom_2rd_list = list()
-        assert 'adam_1k' not in self.name
-        writer_iter = iter_idx
 
         loss = None
         if closure is not None:
             loss = closure()
 
         for group in self.param_groups:
+
 
             for p in group['params']:
                 if p.grad is None:
@@ -106,45 +109,31 @@ class RAdam(torch.optim.Optimizer):
                 if len(state) == 0:
                     state['step'] = 0
                     state['exp_avg'] = torch.zeros_like(p_data_fp32)
-                    state['exp_avg_sq'] = torch.zeros_like(p_data_fp32)
+                    state['exp_avg_sq'] = 0
+                    if amsgrad:
+                        state['max_exp_avg_sq'] = torch.zeros_like(p_data_fp32)
                 else:
                     state['exp_avg'] = state['exp_avg'].type_as(p_data_fp32)
-                    state['exp_avg_sq'] = state['exp_avg_sq'].type_as(p_data_fp32)
+                    if amsgrad:
+                        state['max_exp_avg_sq'] = state['max_exp_avg_sq'].type_as(p_data_fp32)
 
-                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                exp_avg = state['exp_avg']
+                if amsgrad:
+                    max_exp_avg_sq = state['max_exp_avg_sq']
                 beta1, beta2 = group['betas']
 
-                exp_avg_sq.mul_(beta2).addcmul_(1 - beta2, grad, grad)
-                exp_avg.mul_(beta1).add_(1 - beta1, grad)
-
                 state['step'] += 1
+                state['exp_avg_sq'] = state['exp_avg_sq']*beta2 + (1-beta2)*grad.norm().item()**2
 
-                beta2_t = beta2 ** state['step']
-                N_sma_max = 2 / (1 - beta2) - 1
-                N_sma = N_sma_max - 2 * state['step'] * beta2_t / (1 - beta2_t)
+                denom = state['exp_avg_sq']**0.5 + group['eps']
 
+                step_size = group['lr']
+
+
+                exp_avg.mul_(beta1).add_( grad/denom )
                 if group['weight_decay'] != 0:
-                    p_data_fp32.add_(-group['weight_decay'] * group['lr'], p_data_fp32)
-
-                # more conservative since it's an approximated value
-                if N_sma >= 5:
-                    step_size = group['lr'] * math.sqrt((1 - beta2_t ) * (N_sma - 4) / (N_sma_max - 4) * (N_sma - 2) * (N_sma_max) / N_sma / (N_sma_max - 2)) / (1 - beta1 ** state['step'])
-                    denom = exp_avg_sq.sqrt().add_(group['eps'])
-                    p_data_fp32.addcdiv_(-step_size, exp_avg, denom)
-                else:
-                    step_size = group['lr'] / (1 - beta1 ** state['step'])
-                    p_data_fp32.add_(-step_size, exp_avg)
-
+                    exp_avg.add_( group['weight_decay'], p_data_fp32)
+                p_data_fp32.add_(-step_size, exp_avg)
                 p.data.copy_(p_data_fp32)
-
-        #         if writer_iter > 0 and writer_iter % 300 == 0 or writer_iter in [1, 5, 10, 25, 50, 75, 100, 150, 200]:
-        #             grad_list.extend( grad.abs().add_(1e-9).log().view(-1).tolist()  )
-        #             mom_list.extend( exp_avg.abs().add_(1e-9).log().view(-1).tolist() )
-        #             mom_2rd_list.extend( exp_avg_sq.abs().add_(1e-9).log().view(-1).tolist() )
-
-        # if writer_iter > 0 and writer_iter % 300 == 0 or writer_iter in [1, 5, 10, 25, 50, 75, 100, 150, 200]:
-        #     writer.add_histogram('grad/{}'.format(self.name), grad_list, writer_iter)
-        #     writer.add_histogram('mom/{}'.format(self.name), mom_list, writer_iter)
-        #     writer.add_histogram('mom_sq/{}'.format(self.name), mom_2rd_list, writer_iter)
 
         return loss

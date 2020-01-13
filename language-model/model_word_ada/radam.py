@@ -12,9 +12,9 @@ import torch.optim
 class RAdam(Optimizer):
 
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
-                 weight_decay=0, amsgrad=False, use_variance=True):
+                 weight_decay=0):
         defaults = dict(lr=lr, betas=betas, eps=eps,
-                        weight_decay=weight_decay, amsgrad=amsgrad, use_variance=True)
+                        weight_decay=weight_decay)
 
         super(RAdam, self).__init__(params, defaults)
 
@@ -39,7 +39,6 @@ class RAdam(Optimizer):
                 grad = p.grad.data.float()
                 if grad.is_sparse:
                     raise RuntimeError('Adam does not support sparse gradients, please consider SparseAdam instead')
-                amsgrad = group['amsgrad']
 
                 p_data_fp32 = p.data.float()
 
@@ -65,12 +64,14 @@ class RAdam(Optimizer):
                     N_sma_max = 2 / (1 - beta2) - 1
                     N_sma = N_sma_max - 2 * state['step'] * beta2_t / (1 - beta2_t)
                     beta1_t = 1 - beta1 ** state['step']
-                    ratio = math.sqrt((1 - beta2_t) * (N_sma - 4) / (N_sma_max - 4) * (N_sma - 2) / N_sma * N_sma_max / (N_sma_max - 2)) / beta1_t
+                    if N_sma >= 5:
+                        ratio = math.sqrt((1 - beta2_t) * (N_sma - 4) / (N_sma_max - 4) * (N_sma - 2) / N_sma * N_sma_max / (N_sma_max - 2)) / beta1_t
 
                 if group['weight_decay'] != 0:
                     p_data_fp32.add_(-group['weight_decay'] * group['lr'], p_data_fp32)
 
-                if N_sma > 5:                    
+                # more conservative since it's an approximated value
+                if N_sma >= 5:                    
                     step_size = group['lr'] * ratio
                     denom = exp_avg_sq.sqrt().add_(group['eps'])
                     p_data_fp32.addcdiv_(-step_size, exp_avg, denom)
@@ -86,9 +87,9 @@ class RAdam(Optimizer):
 class AdamW(Optimizer):
 
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
-                 weight_decay=0, amsgrad=False, use_variance=True):
+                 weight_decay=0):
         defaults = dict(lr=lr, betas=betas, eps=eps,
-                        weight_decay=weight_decay, amsgrad=amsgrad, use_variance=True)
+                        weight_decay=weight_decay)
 
         super(AdamW, self).__init__(params, defaults)
 
@@ -114,7 +115,6 @@ class AdamW(Optimizer):
                 grad = p.grad.data.float()
                 if grad.is_sparse:
                     raise RuntimeError('Adam does not support sparse gradients, please consider SparseAdam instead')
-                amsgrad = group['amsgrad']
 
                 p_data_fp32 = p.data.float()
 
